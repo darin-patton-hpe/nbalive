@@ -47,7 +47,7 @@ func (b BoolString) Bool() bool { return bool(b) }
 
 // ---- Response Metadata ----
 
-// Meta is the response metadata envelope present in all CDN responses.
+// Meta is the response metadata envelope present in all NBA API responses.
 type Meta struct {
 	Version int    `json:"version"`
 	Code    int    `json:"code"`
