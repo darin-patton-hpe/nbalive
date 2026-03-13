@@ -1,6 +1,12 @@
 # nbalive
 
-Go client library for NBA.com's live game data CDN. Fetches real-time scoreboards, play-by-play, and box scores with zero external dependencies.
+Go client library for NBA live data and stats endpoints with zero external dependencies.
+
+The module is split into focused packages:
+
+- `github.com/darin-patton-hpe/nbalive` (shared response/model types only)
+- `github.com/darin-patton-hpe/nbalive/live` (NBA CDN live endpoints + watcher)
+- `github.com/darin-patton-hpe/nbalive/stats` (NBA Stats API client)
 
 ## Requirements
 
@@ -14,6 +20,8 @@ go get github.com/darin-patton-hpe/nbalive
 
 ## Quick Start
 
+### Live CDN client (`live` package)
+
 ```go
 package main
 
@@ -22,72 +30,74 @@ import (
     "fmt"
     "log"
 
-    "github.com/darin-patton-hpe/nbalive"
+    "github.com/darin-patton-hpe/nbalive/live"
 )
 
 func main() {
-    client := nbalive.NewClient()
+    client := live.NewClient()
     ctx := context.Background()
 
-    // Today's scoreboard
     sb, err := client.Scoreboard(ctx)
     if err != nil {
         log.Fatal(err)
     }
+
     for _, g := range sb.Scoreboard.Games {
         fmt.Printf("%s %d - %d %s (%s)\n",
             g.AwayTeam.TeamTricode, g.AwayTeam.Score,
             g.HomeTeam.Score, g.HomeTeam.TeamTricode,
             g.GameStatus)
     }
+}
+```
 
-    // Only in-progress games
-    live, err := client.LiveGames(ctx)
+### Stats API client (`stats` package)
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/darin-patton-hpe/nbalive/stats"
+)
+
+func main() {
+    client := stats.NewClient()
+    ctx := context.Background()
+
+    sb, err := client.ScoreboardByDate(ctx, "2024-11-15")
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("%d games in progress\n", len(live))
+
+    fmt.Printf("%s: %d games\n", sb.Scoreboard.GameDate, len(sb.Scoreboard.Games))
 }
 ```
 
-### One-Shot Fetches
-
-```go
-// Play-by-play for a specific game
-pbp, err := client.PlayByPlay(ctx, "0022400123")
-for _, a := range pbp.Game.Actions {
-    fmt.Printf("Q%d %s: %s\n", a.Period, a.Clock, a.Description)
-}
-
-// Box score for a specific game
-bs, err := client.BoxScore(ctx, "0022400123")
-fmt.Printf("%s %d - %d %s\n",
-    bs.Game.AwayTeam.TeamTricode, bs.Game.AwayTeam.Score,
-    bs.Game.HomeTeam.Score, bs.Game.HomeTeam.TeamTricode)
-```
-
-### Live Game Watcher
-
-`Watch` polls a game and emits events on a channel. The channel closes when the game ends or the context is cancelled.
+## Live Watcher
 
 ```go
 ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
 
-ch := client.Watch(ctx, "0022400123", nbalive.WatchConfig{
-    PollInterval: 10 * time.Second, // min 5s, default 15s
-    BoxScore:     true,              // also fetch box scores each tick
+client := live.NewClient()
+ch := client.Watch(ctx, "0022400123", live.WatchConfig{
+    PollInterval: 10 * time.Second,
+    BoxScore:     true,
 })
 
 for event := range ch {
     switch event.Kind {
-    case nbalive.EventAction:
+    case live.EventAction:
         fmt.Printf("[%s] %s\n", event.Action.Clock, event.Action.Description)
-    case nbalive.EventBoxScore:
+    case live.EventBoxScore:
         fmt.Printf("Score: %d-%d\n", event.BoxScore.AwayTeam.Score, event.BoxScore.HomeTeam.Score)
-    case nbalive.EventGameOver:
+    case live.EventGameOver:
         fmt.Printf("Final: %d-%d\n", event.BoxScore.AwayTeam.Score, event.BoxScore.HomeTeam.Score)
-    case nbalive.EventError:
+    case live.EventError:
         log.Printf("transient error: %v", event.Err)
     }
 }
@@ -95,7 +105,15 @@ for event := range ch {
 
 ## API Reference
 
-### Client
+### Shared types (`nbalive`)
+
+The root package provides shared JSON models and helpers used by both sub-packages:
+
+- responses (`ScoreboardResponse`, `PlayByPlayResponse`, `BoxScoreResponse`)
+- domain models (`Game`, `Action`, `BoxScoreGame`, `PlayerStats`, `TeamStats`, ...)
+- utility types (`GameStatus`, `BoolString`, `Duration`)
+
+### Live package (`live`)
 
 ```go
 func NewClient(opts ...Option) *Client
@@ -103,43 +121,32 @@ func WithHTTPClient(hc *http.Client) Option
 func WithBaseURL(url string) Option
 ```
 
-### Methods
+| Method | Description |
+|---|---|
+| `Scoreboard(ctx)` | Today's full scoreboard from CDN |
+| `LiveGames(ctx)` | In-progress games from today's scoreboard |
+| `PlayByPlay(ctx, gameID)` | Play-by-play actions for a game |
+| `BoxScore(ctx, gameID)` | Box score for a game |
+| `Watch(ctx, gameID, cfg)` | Polling watcher with ETag + dedupe, returns `<-chan Event` |
+
+Watcher event kinds:
+
+- `EventAction`
+- `EventBoxScore`
+- `EventGameOver`
+- `EventError`
+
+### Stats package (`stats`)
+
+```go
+func NewClient(opts ...Option) *Client
+func WithHTTPClient(hc *http.Client) Option
+func WithBaseURL(url string) Option
+```
 
 | Method | Description |
 |---|---|
-| `Scoreboard(ctx)` | Today's full scoreboard |
-| `LiveGames(ctx)` | Convenience filter for in-progress games |
-| `PlayByPlay(ctx, gameID)` | Play-by-play actions for a game |
-| `BoxScore(ctx, gameID)` | Box score (player/team stats) for a game |
-| `Watch(ctx, gameID, cfg)` | Live polling with deduplication, returns `<-chan Event` |
-
-### Event Kinds
-
-| Kind | Payload | When |
-|---|---|---|
-| `EventAction` | `event.Action` | New play-by-play action (deduplicated by `orderNumber`) |
-| `EventBoxScore` | `event.BoxScore` | Updated box score (when `WatchConfig.BoxScore = true`) |
-| `EventGameOver` | `event.BoxScore` | `gameStatus == Final`; channel closes after this |
-| `EventError` | `event.Err` | Transient fetch/decode error; polling continues |
-
-### Key Types
-
-| Type | Purpose |
-|---|---|
-| `GameStatus` | `GameScheduled` (1), `GameInProgress` (2), `GameFinal` (3) |
-| `BoolString` | Handles NBA's `"1"`/`"0"` JSON string booleans |
-| `Duration` | Wraps `time.Duration` with NBA's ISO 8601 clock format (`"PT11M58.00S"`) |
-
-### Game IDs
-
-NBA game IDs are 10-digit strings like `0022400123`. Find them from the scoreboard:
-
-```go
-sb, _ := client.Scoreboard(ctx)
-for _, g := range sb.Scoreboard.Games {
-    fmt.Println(g.GameID, g.HomeTeam.TeamTricode, "vs", g.AwayTeam.TeamTricode)
-}
-```
+| `ScoreboardByDate(ctx, date)` | ScoreboardV3 for a specific `YYYY-MM-DD` date |
 
 ## Development
 
@@ -155,13 +162,7 @@ go build ./...
 go test ./... -race
 ```
 
-Tests use `testing/synctest` (Go 1.26) for deterministic watcher tests with fake clocks — no real network calls, no sleeps, sub-second execution.
-
-Run verbose:
-
-```sh
-go test ./... -v -race -timeout 30s
-```
+Watcher tests use `testing/synctest` (Go 1.26) for deterministic fake-clock polling tests.
 
 ### Lint
 
@@ -173,30 +174,45 @@ go vet ./...
 
 ```
 nbalive/
-  go.mod              Module definition (Go 1.26, zero dependencies)
-  doc.go              Package-level godoc
-  client.go           Client, options, HTTP get/getIfModified
-  scoreboard.go       Scoreboard(), LiveGames()
-  playbyplay.go       PlayByPlay()
-  boxscore.go         BoxScore()
-  watcher.go          Watch(), Event, EventKind, WatchConfig
-  types.go            All JSON structs, GameStatus, BoolString
-  duration.go         Duration type (ISO 8601 PT...S parsing)
-  client_test.go      Client + endpoint tests (httptest)
-  watcher_test.go     Watcher tests (synctest + fake RoundTripper)
-  duration_test.go    Duration parsing + round-trip tests
-  types_test.go       BoolString + GameStatus tests
+  go.mod
+  doc.go
+  types.go
+  duration.go
+  types_test.go
+  duration_test.go
+  live/
+    client.go
+    scoreboard.go
+    playbyplay.go
+    boxscore.go
+    watcher.go
+    client_test.go
+    watcher_test.go
+  stats/
+    client.go
+    scoreboard.go
+    scoreboard_test.go
 ```
 
-## Data Source
+## Data Sources
 
-All data comes from `https://cdn.nba.com/static/json/liveData/`. No API keys or authentication required. The CDN serves current-season data and updates every ~10-15 seconds during live games.
+### Live CDN (`live`)
+
+Base URL: `https://cdn.nba.com/static/json/liveData`
 
 | Endpoint | URL Pattern |
 |---|---|
 | Scoreboard | `scoreboard/todaysScoreboard_00.json` |
 | Play-by-Play | `playbyplay/playbyplay_{gameID}.json` |
 | Box Score | `boxscore/boxscore_{gameID}.json` |
+
+### Stats API (`stats`)
+
+Base URL: `https://stats.nba.com/stats`
+
+| Endpoint | URL Pattern |
+|---|---|
+| ScoreboardV3 | `scoreboardv3?GameDate=YYYY-MM-DD&LeagueID=00` |
 
 ## License
 
